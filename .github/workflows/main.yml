@@ -1,0 +1,82 @@
+name: Build Ember OS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y nasm xorriso grub-pc-bin grub-common build-essential
+
+      - name: Install i686-elf cross compiler
+        run: |
+          sudo apt install -y gcc-multilib g++-multilib
+          mkdir -p $HOME/opt
+          echo "$HOME/opt/cross/bin" >> $GITHUB_PATH
+
+      - name: Assemble boot.asm
+        run: |
+          nasm -f elf32 source/boot.asm -o build/boot.o
+
+      - name: Assemble Compile.asm
+        run: |
+          nasm -f elf32 build/Compile.asm -o build/compile.o
+
+      - name: Compile Main.c
+        run: |
+          gcc -m32 -c source/Main.c -o build/main.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+
+      - name: Compile Kernel.c
+        run: |
+          gcc -m32 -c source/ember/ui/Kernel.c -o build/kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+
+      - name: Compile Paths.c
+        run: |
+          gcc -m32 -c source/ember/Paths.c -o build/paths.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+
+      - name: Compile Content.c
+        run: |
+          gcc -m32 -c source/ember/Content.c -o build/content.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+
+      - name: Link kernel
+        run: |
+          ld -m elf_i386 -T source/linker.ld -o build/ember.bin \
+            build/boot.o build/compile.o build/main.o build/kernel.o build/paths.o build/content.o \
+            -nostdlib
+
+      - name: Verify multiboot compliance
+        run: |
+          grub-file --is-x86-multiboot build/ember.bin && echo "Multiboot confirmed"
+
+      - name: Create ISO structure
+        run: |
+          mkdir -p isodir/boot/grub
+          cp build/ember.bin isodir/boot/ember.bin
+          cat > isodir/boot/grub/grub.cfg << 'EOF'
+          menuentry "Ember OS" {
+              multiboot /boot/ember.bin
+          }
+          EOF
+
+      - name: Build ISO
+        run: |
+          grub-mkrescue -o build/ember.iso isodir
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ember-os-build
+          path: |
+            build/ember.bin
+            build/ember.iso
