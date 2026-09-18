@@ -16,6 +16,7 @@ concurrency:
 env:
   BUILD_DIR: build
   ISO_DIR: isodir
+  NDK_VERSION: 26.1.10909125
 
 jobs:
   build:
@@ -131,21 +132,47 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install Android platform and build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Install QEMU build dependencies
         run: |
           sudo apt update
           sudo apt install -y ninja-build pkg-config libglib2.0-dev python3-venv
 
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+          key: android-ndk-${{ env.NDK_VERSION }}
+
       - name: Set up Android NDK
-        run: |
-          sdkmanager --install "ndk;26.1.10909125"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+
+      - name: Export NDK path
+        run: echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Cache QEMU build
+        id: cache-qemu
+        uses: actions/cache@v4
+        with:
+          path: android/app/src/main/jniLibs
+          key: qemu-android-${{ hashFiles('app/android/build-qemu-android.sh') }}
+
+      - name: Clone QEMU source
+        if: steps.cache-qemu.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch v8.2.0 https://gitlab.com/qemu-project/qemu.git qemu-src
 
       - name: Build QEMU for Android ABIs
-        run: |
-          git clone --depth 1 --branch v8.2.0 https://gitlab.com/qemu-project/qemu.git qemu-src
-          bash app/android/build-qemu-android.sh qemu-src android/app/src/main/jniLibs "$ANDROID_NDK_HOME"
+        if: steps.cache-qemu.outputs.cache-hit != 'true'
+        run: bash app/android/build-qemu-android.sh qemu-src android/app/src/main/jniLibs "$ANDROID_NDK_HOME"
 
       - name: Copy ember.iso into assets
         run: |
@@ -156,7 +183,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
