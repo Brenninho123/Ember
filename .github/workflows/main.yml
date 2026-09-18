@@ -27,6 +27,7 @@ jobs:
 
       - name: Assemble boot.asm
         run: |
+          mkdir -p build
           nasm -f elf32 source/boot.asm -o build/boot.o
 
       - name: Assemble Compile.asm
@@ -49,10 +50,14 @@ jobs:
         run: |
           gcc -m32 -c source/ember/Content.c -o build/content.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
 
+      - name: Compile Controls.c
+        run: |
+          gcc -m32 -c source/ember/input/Controls.c -o build/controls.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+
       - name: Link kernel
         run: |
           ld -m elf_i386 -T source/linker.ld -o build/ember.bin \
-            build/boot.o build/compile.o build/main.o build/kernel.o build/paths.o build/content.o \
+            build/boot.o build/compile.o build/main.o build/kernel.o build/paths.o build/content.o build/controls.o \
             -nostdlib
 
       - name: Verify multiboot compliance
@@ -80,3 +85,58 @@ jobs:
           path: |
             build/ember.bin
             build/ember.iso
+
+  build-android:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download ember.iso artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ember-os-build
+          path: build
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y ninja-build pkg-config libglib2.0-dev python3-venv
+
+      - name: Set up Android NDK
+        run: |
+          sdkmanager --install "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+
+      - name: Build QEMU for Android ABIs
+        run: |
+          git clone --depth 1 --branch v8.2.0 https://gitlab.com/qemu-project/qemu.git qemu-src
+          bash app/android/build-qemu-android.sh qemu-src android/app/src/main/jniLibs "$ANDROID_NDK_HOME"
+
+      - name: Copy ember.iso into assets
+        run: |
+          mkdir -p android/app/src/main/assets
+          cp build/ember.iso android/app/src/main/assets/ember.iso
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ember-launcher-apk
+          path: android/app/build/outputs/apk/release/*.apk
