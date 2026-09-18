@@ -5,9 +5,21 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_DIR: build
+  ISO_DIR: isodir
 
 jobs:
   build:
+    name: Build Kernel and ISO
     runs-on: ubuntu-latest
 
     steps:
@@ -17,78 +29,89 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt update
-          sudo apt install -y nasm xorriso grub-pc-bin grub-common build-essential
+          sudo apt install -y nasm xorriso grub-pc-bin grub-common mtools build-essential gcc-multilib g++-multilib qemu-system-x86
 
-      - name: Install i686-elf cross compiler
-        run: |
-          sudo apt install -y gcc-multilib g++-multilib
-          mkdir -p $HOME/opt
-          echo "$HOME/opt/cross/bin" >> $GITHUB_PATH
+      - name: Create build directory
+        run: mkdir -p ${{ env.BUILD_DIR }}
 
       - name: Assemble boot.asm
-        run: |
-          mkdir -p build
-          nasm -f elf32 source/boot.asm -o build/boot.o
+        run: nasm -f elf32 source/boot.asm -o ${{ env.BUILD_DIR }}/boot.o
 
       - name: Assemble Compile.asm
-        run: |
-          nasm -f elf32 build/Compile.asm -o build/compile.o
+        run: nasm -f elf32 build/Compile.asm -o ${{ env.BUILD_DIR }}/compile.o
 
       - name: Compile Main.c
-        run: |
-          gcc -m32 -c source/Main.c -o build/main.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+        run: gcc -m32 -c source/Main.c -o ${{ env.BUILD_DIR }}/main.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
 
       - name: Compile Kernel.c
-        run: |
-          gcc -m32 -c source/ember/ui/Kernel.c -o build/kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+        run: gcc -m32 -c source/ember/ui/Kernel.c -o ${{ env.BUILD_DIR }}/kernel.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
 
       - name: Compile Paths.c
-        run: |
-          gcc -m32 -c source/ember/Paths.c -o build/paths.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+        run: gcc -m32 -c source/ember/Paths.c -o ${{ env.BUILD_DIR }}/paths.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
 
       - name: Compile Content.c
-        run: |
-          gcc -m32 -c source/ember/Content.c -o build/content.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+        run: gcc -m32 -c source/ember/Content.c -o ${{ env.BUILD_DIR }}/content.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
 
       - name: Compile Controls.c
-        run: |
-          gcc -m32 -c source/ember/input/Controls.c -o build/controls.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+        run: gcc -m32 -c source/ember/input/Controls.c -o ${{ env.BUILD_DIR }}/controls.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
+
+      - name: Compile USB.c
+        run: gcc -m32 -c source/ember/connect/USB.c -o ${{ env.BUILD_DIR }}/usb.o -std=gnu99 -ffreestanding -fno-pie -O2 -Wall -Wextra -Werror
 
       - name: Link kernel
         run: |
-          ld -m elf_i386 -T source/linker.ld -o build/ember.bin \
-            build/boot.o build/compile.o build/main.o build/kernel.o build/paths.o build/content.o build/controls.o \
+          ld -m elf_i386 -T source/linker.ld -o ${{ env.BUILD_DIR }}/ember.bin \
+            ${{ env.BUILD_DIR }}/boot.o \
+            ${{ env.BUILD_DIR }}/compile.o \
+            ${{ env.BUILD_DIR }}/main.o \
+            ${{ env.BUILD_DIR }}/kernel.o \
+            ${{ env.BUILD_DIR }}/paths.o \
+            ${{ env.BUILD_DIR }}/content.o \
+            ${{ env.BUILD_DIR }}/controls.o \
+            ${{ env.BUILD_DIR }}/usb.o \
             -nostdlib
 
       - name: Verify multiboot compliance
-        run: |
-          grub-file --is-x86-multiboot build/ember.bin && echo "Multiboot confirmed"
+        run: grub-file --is-x86-multiboot ${{ env.BUILD_DIR }}/ember.bin && echo "Multiboot confirmed"
 
       - name: Create ISO structure
         run: |
-          mkdir -p isodir/boot/grub
-          cp build/ember.bin isodir/boot/ember.bin
-          cat > isodir/boot/grub/grub.cfg << 'EOF'
+          mkdir -p ${{ env.ISO_DIR }}/boot/grub
+          cp ${{ env.BUILD_DIR }}/ember.bin ${{ env.ISO_DIR }}/boot/ember.bin
+          cat > ${{ env.ISO_DIR }}/boot/grub/grub.cfg << 'EOF'
+          set timeout=5
+          set default=0
+
           menuentry "Ember OS" {
               multiboot /boot/ember.bin
+          }
+
+          menuentry "Ember OS (safe mode)" {
+              multiboot /boot/ember.bin safe_mode
           }
           EOF
 
       - name: Build ISO
+        run: grub-mkrescue -o ${{ env.BUILD_DIR }}/ember.iso ${{ env.ISO_DIR }}
+
+      - name: Smoke test in QEMU
         run: |
-          grub-mkrescue -o build/ember.iso isodir
+          timeout 15 qemu-system-i386 -cdrom ${{ env.BUILD_DIR }}/ember.iso -m 128 -display none -serial stdio || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ember-os-build
           path: |
-            build/ember.bin
-            build/ember.iso
+            ${{ env.BUILD_DIR }}/ember.bin
+            ${{ env.BUILD_DIR }}/ember.iso
+          retention-days: 14
 
   build-android:
+    name: Build Android APK
     runs-on: ubuntu-latest
     needs: build
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Checkout repository
@@ -140,3 +163,4 @@ jobs:
         with:
           name: ember-launcher-apk
           path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 14
